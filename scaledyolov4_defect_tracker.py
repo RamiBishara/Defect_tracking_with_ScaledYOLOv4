@@ -1,3 +1,5 @@
+# Online Python compiler (interpreter) to run Python online.
+# Write Python 3 code in this online editor and run it.
 import argparse
 import time
 from pathlib import Path
@@ -16,7 +18,7 @@ from utils.general import xyxy2xywh, xywh2xyxy, \
     strip_optimizer, set_logging, increment_path, scale_coords
 from utils.plots import plot_one_box
 from utils.torch_utils import select_device, time_synchronized
-#from utils.roboflow import predict_image
+# from utils.roboflow import predict_image
 
 # deep sort imports
 from deep_sort import preprocessing, nn_matching
@@ -25,39 +27,63 @@ from deep_sort.tracker import Tracker
 from tools import generate_clip_detections as gdet
 
 from utils.yolov5 import Yolov5Engine
-#from utils.yolov4 import Yolov4Engine
+
+# from utils.yolov4 import Yolov4Engine
 
 classes = []
 
 names = []
 
 
-def update_tracks(tracker, frame_count, save_txt, txt_path, save_img, view_img, im0, gn):
-    if len(tracker.tracks):
-        print("[Tracks]", len(tracker.tracks))
+def update_tracks(tracker, detections, frame_count, save_txt, txt_path, save_img, view_img, im0, gn, xyxy=None):
+    if len(tracker.tracks) == len(detections):
+        if len(tracker.tracks):
+            print("[Tracks]", len(tracker.tracks))
 
-    for track in tracker.tracks:
-        if not track.is_confirmed() or track.time_since_update > 1:
-            continue
-        xyxy = track.to_tlbr()
-        class_num = track.class_num
-        bbox = xyxy
-        class_name = names[int(class_num)] if opt.detection_engine == "yolov5" else class_num
-        if opt.info:
-            print("Tracker ID: {}, Class: {}, BBox Coords (xmin, ymin, xmax, ymax): {}".format(
-                str(track.track_id), class_name, (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))))
+        # print(frame_count)
 
-        if save_txt:  # Write to file
-            xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
+        # for d in detections:
+        #   print(d.confidence)
+        print("LEN DET", len(detections))
+        offset = 0
+        for track in tracker.tracks:
+            print(track.is_confirmed())
+            if not track.is_confirmed() or track.time_since_update > 1:
+                # offset = offset + 1
+                print("Not confirmed")
+                continue
+            # else:
+            # print(track.track_id)
+            # print(track.track_id - offset)
+            # if (len(detections) == len(tracker.tracks)):
+            # conf = detections[track.track_id-offset].confidence
+            # else:
+            conf = detections[offset].confidence
+            offset = offset + 1
+            # print("test inside individual conf", conf)
 
-            with open(txt_path + '.txt', 'a') as f:
-                f.write('frame: {}; track: {}; class: {}; bbox: {};\n'.format(frame_count, track.track_id, class_num,
-                                                                              *xywh))
+            xyxy = track.to_tlbr()
+            class_num = track.class_num
+            bbox = xyxy
+            class_name = names[int(class_num)] if opt.detection_engine == "yolov5" else class_num
+            if opt.info:
+                print("Tracker ID: {}, Class: {}, Conf: {}, BBox Coords (xmin, ymin, xmax, ymax): {}".format(
+                    str(track.track_id), class_name, conf, (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))))
+            # here constr datadrame
 
-        if save_img or view_img:  # Add bbox to image
-            label = f'{class_name} #{track.track_id}'
-            plot_one_box(xyxy, im0, label=label,
-                         color=get_color_for(label), line_thickness=opt.thickness)
+    if save_txt:  # Write to file
+        xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
+
+        with open(txt_path + '.txt', 'a') as f:
+            f.write('frame: {}; track: {}; class: {}; bbox: {};\n'.format(frame_count, track.track_id, class_num,
+                                                                          *xywh))
+
+    if save_img or view_img:  # Add bbox to image
+        label = f'{class_name} #{track.track_id}'
+        plot_one_box(xyxy, im0, label=label,
+                     color=get_color_for(label), line_thickness=opt.thickness)
+    return xyxy
+
 
 def get_color_for(class_num):
     colors = [
@@ -72,22 +98,27 @@ def get_color_for(class_num):
         "#8C29FF"
     ]
 
-    num = hash(class_num) # may actually be a number or a string
-    hex = colors[num%len(colors)]
+    num = hash(class_num)  # may actually be a number or a string
+    hex = colors[num % len(colors)]
 
     # adapted from https://stackoverflow.com/questions/29643352/converting-hex-to-rgb-value-in-python
-    rgb = tuple(int(hex.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+    rgb = tuple(int(hex.lstrip('#')[i:i + 2], 16) for i in (0, 2, 4))
 
     return rgb
 
-def detect(save_img=False): #take care of the default value for save_img
+
+def detect(save_img=False):  # take care of the default value for save_img
 
     t0 = time_synchronized()
 
     nms_max_overlap = opt.nms_max_overlap
     max_cosine_distance = opt.max_cosine_distance
     nn_budget = opt.nn_budget
+    video_filename = opt.source
+    width_vid = opt.img_size
+    height_vid = opt.img_size
 
+    print("#########")
     # initialize deep sort
     model_filename = "ViT-B/16"
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -98,25 +129,27 @@ def detect(save_img=False): #take care of the default value for save_img
     # calculate cosine distance metric
     metric = nn_matching.NearestNeighborDistanceMetric(
         "cosine", max_cosine_distance, nn_budget)
-    
+
     # load yolov5 model here
     if opt.detection_engine == "yolov5":
-        yolov5_engine = Yolov5Engine(opt.weights, device, opt.classes, opt.confidence, opt.overlap, opt.agnostic_nms, opt.augment, half)
+        yolov5_engine = Yolov5Engine(opt.weights, device, opt.classes, opt.confidence, opt.overlap, opt.agnostic_nms,
+                                     opt.augment, half)
         global names
         names = yolov5_engine.get_names()
     elif opt.detection_engine == "yolov4":
-        yolov4_engine = Yolov4Engine(opt.weights, opt.cfg, device, opt.names, opt.classes, opt.confidence, opt.overlap, opt.agnostic_nms, opt.augment, half)
+        yolov4_engine = Yolov4Engine(opt.weights, opt.cfg, device, opt.names, opt.classes, opt.confidence, opt.overlap,
+                                     opt.agnostic_nms, opt.augment, half)
 
     # initialize tracker
     tracker = Tracker(metric)
 
     source, weights, view_img, save_txt, imgsz = opt.source, opt.weights, opt.view_img, opt.save_txt, opt.img_size
     webcam = source == 'pylon' or source.isnumeric() or source.endswith('.txt') or source.lower().startswith(
-        ('rtsp://', 'rtmp://', 'http://'))	
-    print("webcam: "+str(webcam))
+        ('rtsp://', 'rtmp://', 'http://'))
+    print("webcam: " + str(webcam))
     # Directories
     save_dir = Path(increment_path(Path(opt.project) / opt.name,
-                    exist_ok=opt.exist_ok))  # increment run
+                                   exist_ok=opt.exist_ok))  # increment run
     (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True,
                                                           exist_ok=True)  # make dir
 
@@ -132,7 +165,7 @@ def detect(save_img=False): #take care of the default value for save_img
         cudnn.benchmark = True  # set True to speed up constant image size inference
         dataset = LoadStreams(source, img_size=(1280, 1280))
     else:
-        save_img = True # comment to false if you do not want to save the detection/tracking video and moreover, check the image size below
+        save_img = True  # comment to false if you do not want to save the detection/tracking video and moreover, check the image size below
         dataset = LoadImages(source, img_size=(1280, 1280))
 
     frame_count = 0
@@ -150,7 +183,7 @@ def detect(save_img=False): #take care of the default value for save_img
         # Roboflow Inference
         t1 = time_synchronized()
         p, s, im0, frame = path, '', im0s, getattr(dataset, 'frame', 0)
-        #print("Size :"+str(im0))
+        # print("Size :"+str(im0))
         # choose between prediction engines (yolov5 and roboflow)
         if opt.detection_engine == "roboflow":
             pred, classes = predict_image(im0, opt.api_key, opt.url, opt.confidence, opt.overlap, frame_count)
@@ -158,26 +191,26 @@ def detect(save_img=False): #take care of the default value for save_img
         elif opt.detection_engine == "yolov5":
             print("yolov5 inference")
             pred = yolov5_engine.infer(img)
-        #else:
-          #  print("yolov4 inference {}".format(im0.shape))
-          #  pred = yolov4_engine.infer(im0)
-          #  pred, classes = yolov4_engine.postprocess(pred, im0.shape)
-          #  pred = [torch.tensor(pred)]
+        # else:
+        #  print("yolov4 inference {}".format(im0.shape))
+        #  pred = yolov4_engine.infer(im0)
+        #  pred, classes = yolov4_engine.postprocess(pred, im0.shape)
+        #  pred = [torch.tensor(pred)]
 
         t2 = time_synchronized()
         # Process detections
         for i, det in enumerate(pred):  # detections per image
-            #moved up to roboflow inference
+            # moved up to roboflow inference
             if webcam:  # batch_size >= 1
                 p, s, im0, frame = path[i], '%g: ' % i, im0s[i].copy(
                 ), dataset.count
-            #else:
-                #p, s, im0, frame = path, '', im0s, getattr(dataset, 'frame', 0)
+            # else:
+            # p, s, im0, frame = path, '', im0s, getattr(dataset, 'frame', 0)
 
-            #p = Path(p)  # to Path
+            # p = Path(p)  # to Path
             save_path = str(save_dir / Path(p).name)  # img.jpg
             txt_path = str(save_dir / 'labels' / Path(p).stem) + \
-                ('' if dataset.mode == 'image' else f'_{frame}')  # img.txt
+                       ('' if dataset.mode == 'image' else f'_{frame}')  # img.txt
 
             # normalization gain whwh
             gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]
@@ -199,12 +232,11 @@ def detect(save_img=False): #take care of the default value for save_img
 
                     # Print results
                     # Rescale boxes from img_size to im0 size
-                    #det[:, :4] = scale_coords([1,1], det[:, :4], im0.shape).round()
+                    # det[:, :4] = scale_coords([1,1], det[:, :4], im0.shape).round()
                     clss = np.array(classes)
                     for c in np.unique(clss):
                         n = (clss == c).sum()  # detections per class
                         s += f'{n} {c}, '  # add to string
-
 
                     # Transform bboxes from tlbr to tlwh
                     trans_bboxes = det[:, :4].clone()
@@ -236,8 +268,6 @@ def detect(save_img=False): #take care of the default value for save_img
 
                     print(s)
 
-
-
                 # encode yolo detections and feed to tracker
                 features = encoder(im0, bboxes)
                 detections = [Detection(bbox, conf, class_num, feature) for bbox, conf, class_num, feature in zip(
@@ -246,7 +276,7 @@ def detect(save_img=False): #take care of the default value for save_img
                 # run non-maxima supression
                 boxs = np.array([d.tlwh for d in detections])
                 scores = np.array([d.confidence for d in detections])
-                class_nums = np.array([d.class_num for d in detections])
+                class_nums = np.array([d.class_num.cpu() for d in detections])
                 indices = preprocessing.non_max_suppression(
                     boxs, class_nums, nms_max_overlap, scores)
                 detections = [detections[i] for i in indices]
@@ -256,17 +286,23 @@ def detect(save_img=False): #take care of the default value for save_img
                 tracker.update(detections)
 
                 # update tracks
-                update_tracks(tracker, frame_count, save_txt, txt_path, save_img, view_img, im0, gn)
+                update_tracks(tracker, detections, frame_count, save_txt, txt_path, save_img, view_img, im0, gn)
+                if xyxy == None:
+                    xyxy = update_tracks(tracker, detections, frame_count, save_txt, txt_path, save_img, view_img, im0,
+                                         gn)
+                else:
+                    xyxy = update_tracks(tracker, detections, frame_count, save_txt, txt_path, save_img, view_img, im0,
+                                         gn, xyxy)
 
             # Print time (inference + NMS)
             print(f'Done. ({t2 - t1:.3f}s)')
 
             # Stream results
-            print("VIEWIMG: "+str(view_img))
+            print("VIEWIMG: " + str(view_img))
             if view_img:
                 im0 = cv2.resize(im0, (1280, 1280))
                 cv2.imshow(str(p), im0)
-                #print("***", im0.shape)
+                # print("***", im0.shape)
                 if cv2.waitKey(1) == ord('q'):  # q to quit
                     raise StopIteration
 
@@ -289,7 +325,7 @@ def detect(save_img=False): #take care of the default value for save_img
                             save_path, cv2.VideoWriter_fourcc(*fourcc), fps, (w, h))
                     vid_writer.write(im0)
 
-            frame_count = frame_count+1
+            frame_count = frame_count + 1
 
     if save_txt or save_img:
         s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
@@ -346,14 +382,15 @@ if __name__ == '__main__':
                         help='Maximum size of the appearance descriptors allery. If None, no budget is enforced.')
     parser.add_argument('--info', action='store_true',
                         help='Print debugging info.')
-    parser.add_argument("--detection-engine", default="roboflow", help="Which engine you want to use for object detection (scaledyoov4, yolov5, yolov4, roboflow).")
+    parser.add_argument("--detection-engine", default="roboflow",
+                        help="Which engine you want to use for object detection (scaledyoov4, yolov5, yolov4, roboflow).")
     opt = parser.parse_args()
     print(opt)
 
     with torch.no_grad():
         if opt.update:  # update all models (to fix SourceChangeWarning)
             for opt.weights in ['yolov5s.pt', 'yolov5m.pt', 'yolov5l.pt', 'yolov5x.pt']:
-                detect()
+                detect(opt.source)
                 strip_optimizer(opt.weights)
         else:
             detect()
