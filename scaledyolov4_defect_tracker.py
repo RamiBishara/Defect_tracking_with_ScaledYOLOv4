@@ -1,16 +1,17 @@
-# Online Python compiler (interpreter) to run Python online.
-# Write Python 3 code in this online editor and run it.
 import argparse
 import time
 from pathlib import Path
-
+import ntpath
 import clip
 
+ntpath.basename("a/b/c")
 import cv2
 import torch
 import torch.backends.cudnn as cudnn
 from numpy import random
 import numpy as np
+import json
+import math
 
 from models.experimental import attempt_load
 from utils.datasets import LoadStreams, LoadImages
@@ -30,59 +31,85 @@ from utils.yolov5 import Yolov5Engine
 
 # from utils.yolov4 import Yolov4Engine
 
+
 classes = []
 
 names = []
 
+MOVEMENT_THRESHOLD = 0.0002
 
-def update_tracks(tracker, detections, frame_count, save_txt, txt_path, save_img, view_img, im0, gn, xyxy=None):
-    if len(tracker.tracks) == len(detections):
-        if len(tracker.tracks):
-            print("[Tracks]", len(tracker.tracks))
+moved_here = []
+counters_detected = []
+counters_moved = []
 
-        # print(frame_count)
 
-        # for d in detections:
-        #   print(d.confidence)
-        print("LEN DET", len(detections))
-        offset = 0
-        for track in tracker.tracks:
-            print(track.is_confirmed())
-            if not track.is_confirmed() or track.time_since_update > 1:
-                # offset = offset + 1
-                print("Not confirmed")
-                continue
-            # else:
-            # print(track.track_id)
-            # print(track.track_id - offset)
-            # if (len(detections) == len(tracker.tracks)):
-            # conf = detections[track.track_id-offset].confidence
-            # else:
+def update_tracks(tracker, detections, frame_count, save_txt, txt_path, save_img, view_img, im0, gn):
+    if len(tracker.tracks):
+        print("[Tracks]", len(tracker.tracks))
+
+    # print(frame_count)
+
+    # for d in detections:
+    #   print(d.confidence)
+    print("LEN DET", len(detections))
+    offset = 0
+    BBOXTOPRINT = [0, 0, 0, 0]
+    conf = 0
+    class_name = ''
+    idt = 0
+
+    for track in tracker.tracks:
+        print(track.is_confirmed())
+        if not track.is_confirmed() or track.time_since_update > 1:
+            # offset = offset + 1
+            print("Not confirmed")
+            continue
+        # else:
+        # print(track.track_id)
+        # print(track.track_id - offset)
+        # if (len(detections) == len(tracker.tracks)):
+        # conf = detections[track.track_id-offset].confidence
+        # else:
+        try:
             conf = detections[offset].confidence
-            offset = offset + 1
-            # print("test inside individual conf", conf)
+        except:
+            print("detection out of index")
 
-            xyxy = track.to_tlbr()
-            class_num = track.class_num
-            bbox = xyxy
-            class_name = names[int(class_num)] if opt.detection_engine == "yolov5" else class_num
-            if opt.info:
-                print("Tracker ID: {}, Class: {}, Conf: {}, BBox Coords (xmin, ymin, xmax, ymax): {}".format(
-                    str(track.track_id), class_name, conf, (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))))
-            # here constr datadrame
+        print("conf - ", conf)
+        offset = offset + 1
+        # print("test inside individual conf", conf)
 
-    if save_txt:  # Write to file
-        xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
+        xyxy = track.to_tlbr()
+        class_num = track.class_num
+        bbox = xyxy
+        BBOXTOPRINT = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
 
-        with open(txt_path + '.txt', 'a') as f:
-            f.write('frame: {}; track: {}; class: {}; bbox: {};\n'.format(frame_count, track.track_id, class_num,
-                                                                          *xywh))
+        print("bbox - ", BBOXTOPRINT)
 
-    if save_img or view_img:  # Add bbox to image
-        label = f'{class_name} #{track.track_id}'
-        plot_one_box(xyxy, im0, label=label,
-                     color=get_color_for(label), line_thickness=opt.thickness)
-    return xyxy
+        class_name = names[int(class_num)] if opt.detection_engine == "yolov5" else class_num
+        if opt.info:
+            print("Tracker ID: {}, Class: {}, Conf: {}, BBox Coords (xmin, ymin, xmax, ymax): {}".format(
+                str(track.track_id), class_name, conf, (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))))
+        # here constr datadrame
+        idt = str(track.track_id)
+        if save_txt:  # Write to file
+            xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
+
+            with open(txt_path + '.txt', 'a') as f:
+                f.write('frame: {}; track: {}; class: {}; bbox: {};\n'.format(frame_count, track.track_id, class_num,
+                                                                              *xywh))
+
+        if save_img or view_img:  # Add bbox to image
+            label = f'{class_name} #{track.track_id}'
+            plot_one_box(xyxy, im0, label=label,
+                         color=get_color_for(label), line_thickness=opt.thickness)
+
+    return BBOXTOPRINT, idt, class_name, conf
+
+
+def path_leaf(path):
+    head, tail = ntpath.split(path)
+    return tail or ntpath.basename(head)
 
 
 def get_color_for(class_num):
@@ -105,6 +132,21 @@ def get_color_for(class_num):
     rgb = tuple(int(hex.lstrip('#')[i:i + 2], 16) for i in (0, 2, 4))
 
     return rgb
+
+
+def position_moved(coordinate1: [], coordinate2: [], threshold):
+    x1 = (coordinate1[0] + coordinate1[1]) / 2
+    y1 = (coordinate1[2] + coordinate1[3]) / 2
+
+    x2 = (coordinate2[0] + coordinate2[1]) / 2
+    y2 = (coordinate2[2] + coordinate2[3]) / 2
+
+    distance = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+    print("distance " + str(distance))
+    if distance < threshold:
+        return False
+
+    return True
 
 
 def detect(save_img=False):  # take care of the default value for save_img
@@ -152,6 +194,26 @@ def detect(save_img=False):  # take care of the default value for save_img
                                    exist_ok=opt.exist_ok))  # increment run
     (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True,
                                                           exist_ok=True)  # make dir
+    json_name = path_leaf(Path(source))
+    # coordinates = {"x1": 1,
+    #                  "x2": 2,
+    #                 "y1": 0,
+    #                  "y2": 8}
+    # detect_dict = {"category": "beetle",
+    #                 "coordinates": coordinates,
+    #                 "id": 0,
+    #                 "rate": 0.98 }
+    # frame_i = {"frame_index": 2,
+    #             "objects": [detect_dict, detect_dict]}
+    # frame_annotations = {"frame_annotations": frame_i}
+
+    # json_data = {"video_name": source,
+    #                 "width": imgsz,
+    #                 "height": imgsz,
+    #                 "frame_annotations": frame_annotations}
+    # print(json_data)
+    # with open("{}.json".format(source), "w") as f:
+    #   json.dump(json_data, f, indent = 2)
 
     # Initialize
     set_logging()
@@ -163,15 +225,25 @@ def detect(save_img=False):  # take care of the default value for save_img
     if webcam:
         view_img = True
         cudnn.benchmark = True  # set True to speed up constant image size inference
-        dataset = LoadStreams(source, img_size=(1280, 1280))
+        dataset = LoadStreams(source, img_size=(640, 640))
     else:
         save_img = True  # comment to false if you do not want to save the detection/tracking video and moreover, check the image size below
-        dataset = LoadImages(source, img_size=(1280, 1280))
+        dataset = LoadImages(source, img_size=(640, 640))
+
+    frame_annotations = {}
 
     frame_count = 0
     img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
     if opt.detection_engine == "yolov5":
         _ = yolov5_engine.infer(img.half() if half else img) if device.type != 'cpu' else None  # run once
+
+    # position movement counter
+    counter_move = 0
+    prediction_counter = 0
+    existing_frame_counter = 0
+    prev_coordinate = []
+    movements = []
+
     for path, img, im0s, vid_cap in dataset:
 
         img = torch.from_numpy(img).to(device)
@@ -198,8 +270,12 @@ def detect(save_img=False):  # take care of the default value for save_img
         #  pred = [torch.tensor(pred)]
 
         t2 = time_synchronized()
+
+        detection_list = []  # see where this needs to be initialized may not be best place
+
         # Process detections
         for i, det in enumerate(pred):  # detections per image
+            existing_frame_counter += 1
             # moved up to roboflow inference
             if webcam:  # batch_size >= 1
                 p, s, im0, frame = path[i], '%g: ' % i, im0s[i].copy(
@@ -215,6 +291,7 @@ def detect(save_img=False):  # take care of the default value for save_img
             # normalization gain whwh
             gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]
             if len(det):
+                prediction_counter += 1
 
                 print("\n[Detections]")
                 if opt.detection_engine == "roboflow":
@@ -286,16 +363,54 @@ def detect(save_img=False):  # take care of the default value for save_img
                 tracker.update(detections)
 
                 # update tracks
-                update_tracks(tracker, detections, frame_count, save_txt, txt_path, save_img, view_img, im0, gn)
-                if xyxy == None:
-                    xyxy = update_tracks(tracker, detections, frame_count, save_txt, txt_path, save_img, view_img, im0,
-                                         gn)
+                coordinates, t_id, class_name, conf = update_tracks(tracker, detections, frame_count, save_txt,
+                                                                    txt_path, save_img, view_img, im0, gn)
+
+                print("started distance calculation")
+                print("coordinate length: " + str(len(coordinates)))
+                if len(prev_coordinate) == 0:
+                    prev_coordinate = coordinates
+
                 else:
-                    xyxy = update_tracks(tracker, detections, frame_count, save_txt, txt_path, save_img, view_img, im0,
-                                         gn, xyxy)
+                    moved = position_moved(coordinates, prev_coordinate, MOVEMENT_THRESHOLD)
+
+                    prev_coordinate = coordinates
+
+                    print("prev_coordinate: " + str(prev_coordinate))
+                    print("coordinates: " + str(coordinates))
+
+                    # 1. did it move : bool
+                    # 2. what frame out of detected frames it moved : int
+                    # 3. what frame out of existing frames it moved : int
+                    movements.append([moved, prediction_counter, existing_frame_counter])
+                    if moved:
+                        print("has moved")
+                        counter_move += 1
+                    else:
+                        print("didn't move")
+                print("ended distance calculation")
+
+                coord_dict = {"x1": coordinates[0],
+                              "x2": coordinates[1],
+                              "y1": coordinates[2],
+                              "y2": coordinates[3]}
+
+                detect_dict = {"category": class_name,
+                               "coordinates": coord_dict,
+                               "id": t_id,
+                               "rate": conf}
+
+                detection_list.append(detect_dict)
 
             # Print time (inference + NMS)
             print(f'Done. ({t2 - t1:.3f}s)')
+            fps = 1 / (t2 - t1)
+            print("frame index - ", frame_count)
+
+            frame_i = {"frame_index": frame_count,
+                       "objects": detection_list}
+
+            frame_annotations[frame_count] = frame_i
 
             # Stream results
             print("VIEWIMG: " + str(view_img))
@@ -327,10 +442,25 @@ def detect(save_img=False):  # take care of the default value for save_img
 
             frame_count = frame_count + 1
 
+        # frames detected
+        moved_here.append(movements)
+        counters_detected.append(prediction_counter)
+        counters_moved.append(counter_move)
+    print("percentage moved %" + str(round(100 * (counter_move / prediction_counter), 2)))
+    print("percentage of detected frames %" + str(round(100 * (prediction_counter / existing_frame_counter), 2)))
     if save_txt or save_img:
         s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
         print(f"Results saved to {save_dir}{s}")
 
+    json_data = {"video_name": source,
+                 "width": imgsz,
+                 "height": imgsz,
+                 "fps": fps,
+                 "frame_annotations": frame_annotations}
+
+    print(json_data)
+    with open("{}.json".format(source), "w") as f:
+        json.dump(json_data, f, indent=2)
     print(f'Done. ({time.time() - t0:.3f}s)')
 
 
